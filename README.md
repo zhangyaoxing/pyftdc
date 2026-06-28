@@ -1,0 +1,2 @@
+# pyftdc
+Python FTDC reader
