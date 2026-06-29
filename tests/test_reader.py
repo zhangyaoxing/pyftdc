@@ -19,11 +19,12 @@ def test_get_metric_filters_timespan_and_decodes_deltas(tmp_path: Path) -> None:
         [[1000, 1000, 1000], [2, 0, (1 << 64) - 5]],
     )
 
-    points = FTDCReader(tmp_path).get_metric(
-        "serverStatus.connections.current",
+    result = FTDCReader(tmp_path).get_metric(
+        {"serverStatus.connections.current"},
         start + timedelta(seconds=1),
         start + timedelta(seconds=2),
     )
+    points = result["serverStatus.connections.current"]
 
     assert [point.timestamp for point in points] == [
         start + timedelta(seconds=1),
@@ -32,14 +33,56 @@ def test_get_metric_filters_timespan_and_decodes_deltas(tmp_path: Path) -> None:
     assert [point.value for point in points] == [12, 12]
 
 
+def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
+    """A query returns a separate ordered point list for each requested metric."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 1, "other": 10},
+        [[1000, 1000], [1, 1], [2, 2]],
+    )
+
+    result = FTDCReader(path).get_metric({"value", "other"}, start, start + timedelta(seconds=2))
+
+    assert list(result) == ["other", "value"]
+    assert [point.value for point in result["value"]] == [1, 2, 3]
+    assert [point.value for point in result["other"]] == [10, 12, 14]
+
+
+def test_empty_names_returns_all_metrics(tmp_path: Path) -> None:
+    """An empty name set selects every metric in the archive."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 1, "other": 10},
+        [[1000], [1], [2]],
+    )
+
+    result = FTDCReader(path).get_metric(set(), start, start + timedelta(seconds=1))
+
+    assert set(result) == {"start", "value", "other"}
+    assert all(len(points) == 2 for points in result.values())
+
+
 def test_missing_metric_raises(tmp_path: Path) -> None:
-    """A metric absent from every chunk raises a specific error."""
+    """A requested metric absent from every chunk raises a specific error."""
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = write_ftdc(tmp_path / "metrics.interim", {"start": start, "value": 1}, [[], []])
 
     with pytest.raises(MetricNotFoundError):
-        FTDCReader(path).get_metric("other", start, start)
+        FTDCReader(path).get_metric({"value", "other"}, start, start)
+
+
+def test_rejects_empty_metric_name(tmp_path: Path) -> None:
+    """An empty string is not a valid requested metric name."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="metric names"):
+        FTDCReader(tmp_path).get_metric({""}, start, start)
 
 
 def test_rejects_naive_timespan(tmp_path: Path) -> None:
@@ -48,28 +91,31 @@ def test_rejects_naive_timespan(tmp_path: Path) -> None:
     reader = FTDCReader(tmp_path)
 
     with pytest.raises(ValueError, match="timezone-aware"):
-        reader.get_metric("value", datetime(2026, 1, 1), datetime(2026, 1, 2))
+        reader.get_metric({"value"}, datetime(2026, 1, 1), datetime(2026, 1, 2))
 
 
 def test_get_metric_samples_points(tmp_path: Path) -> None:
-    """A sample rate uniformly skips points within the requested timespan."""
+    """A sample rate uniformly skips points for every requested metric."""
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = write_ftdc(
         tmp_path / "metrics.interim",
-        {"start": start, "value": 0},
-        [[1000] * 9, [1] * 9],
+        {"start": start, "value": 0, "other": 10},
+        [[1000] * 9, [1] * 9, [2] * 9],
     )
 
-    points = FTDCReader(path).get_metric(
-        "value",
+    result = FTDCReader(path).get_metric(
+        {"value", "other"},
         start,
         start + timedelta(seconds=9),
         sample_rate=0.1,
     )
 
-    assert [(point.timestamp, point.value) for point in points] == [
+    assert [(point.timestamp, point.value) for point in result["value"]] == [
         (start + timedelta(seconds=9), 9)
+    ]
+    assert [(point.timestamp, point.value) for point in result["other"]] == [
+        (start + timedelta(seconds=9), 28)
     ]
 
 
@@ -81,4 +127,4 @@ def test_rejects_invalid_sample_rate(tmp_path: Path, sample_rate: float) -> None
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
     with pytest.raises(ValueError, match="sample_rate"):
-        reader.get_metric("value", start, start, sample_rate=sample_rate)
+        reader.get_metric({"value"}, start, start, sample_rate=sample_rate)

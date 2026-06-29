@@ -30,15 +30,16 @@ class FTDCReader:
 
     def get_metric(
         self,
-        name: str,
+        name: set[str],
         start: datetime,
         end: datetime,
         sample_rate: float = 1.0,
-    ) -> list[DataPoint]:
-        """Return sampled observations for *name* in the inclusive UTC timespan."""
+    ) -> dict[str, list[DataPoint]]:
+        """Return sampled observations by metric name in the inclusive UTC timespan."""
 
-        if not name:
-            raise ValueError("metric name must not be empty")
+        requested_names = set(name)
+        if "" in requested_names:
+            raise ValueError("metric names must not be empty")
         start_utc = _as_utc(start, "start")
         end_utc = _as_utc(end, "end")
         if start_utc > end_utc:
@@ -46,34 +47,41 @@ class FTDCReader:
         if not math.isfinite(sample_rate) or not 0 < sample_rate <= 1:
             raise ValueError("sample_rate must be greater than 0 and at most 1")
 
-        found = False
-        point_number = 0
-        points_by_time: dict[datetime, DataPoint] = {}
+        found_names: set[str] = set()
+        point_numbers: dict[str, int] = {}
+        points_by_name: dict[str, dict[datetime, DataPoint]] = {}
         for chunk in self._metric_chunks():
-            matching_indexes = [
-                index
+            matching_slots = {
+                slot.path: (index, slot)
                 for index, slot in enumerate(chunk.slots)
-                if slot.path == name and slot.part == 0
-            ]
-            if not matching_indexes:
+                if slot.part == 0 and (not requested_names or slot.path in requested_names)
+            }
+            if not matching_slots:
                 continue
-            found = True
-            metric_index = matching_indexes[0]
-            slot = chunk.slots[metric_index]
+            found_names.update(matching_slots)
+            for metric_name in matching_slots:
+                point_numbers.setdefault(metric_name, 0)
+                points_by_name.setdefault(metric_name, {})
             for row in chunk.rows:
                 timestamp = timestamp_for_row(chunk, row)
                 if start_utc <= timestamp <= end_utc:
-                    point_number += 1
-                    if int(point_number * sample_rate) == int((point_number - 1) * sample_rate):
-                        continue
-                    points_by_time[timestamp] = DataPoint(
-                        timestamp=timestamp,
-                        value=value_for_slot(slot, row[metric_index]),
-                    )
+                    for metric_name, (metric_index, slot) in matching_slots.items():
+                        point_number = point_numbers[metric_name] + 1
+                        point_numbers[metric_name] = point_number
+                        if int(point_number * sample_rate) == int((point_number - 1) * sample_rate):
+                            continue
+                        points_by_name[metric_name][timestamp] = DataPoint(
+                            timestamp=timestamp,
+                            value=value_for_slot(slot, row[metric_index]),
+                        )
 
-        if not found:
-            raise MetricNotFoundError(name)
-        return [points_by_time[key] for key in sorted(points_by_time)]
+        missing_names = requested_names - found_names
+        if missing_names:
+            raise MetricNotFoundError(sorted(missing_names)[0])
+        return {
+            metric_name: [points[timestamp] for timestamp in sorted(points)]
+            for metric_name, points in sorted(points_by_name.items())
+        }
 
     query = get_metric
 

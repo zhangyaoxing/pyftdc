@@ -27,22 +27,24 @@ from datetime import datetime, timezone
 from pyftdc import FTDCReader
 
 reader = FTDCReader("/var/lib/mongo/diagnostic.data")
-points = reader.get_metric(
-    "serverStatus.connections.current",
+metrics = reader.get_metric(
+    {"serverStatus.connections.current"},
     start=datetime(2026, 1, 1, tzinfo=timezone.utc),
     end=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
     sample_rate=0.1,
 )
+points = metrics["serverStatus.connections.current"]
 ```
 
 The source may be one `metrics.*` file or a `diagnostic.data` directory.
-Timespan endpoints are inclusive and must be timezone-aware. Results are
-ordered by UTC timestamp. `sample_rate` must be greater than 0 and at most 1;
+Timespan endpoints are inclusive and must be timezone-aware. The result maps each
+requested name to points ordered by UTC timestamp. Pass an empty set to read every
+metric. `sample_rate` must be greater than 0 and at most 1;
 for example, `0.1` returns approximately 10% of points. Its default is `1.0`.
 `query()` is an alias for `get_metric()`.
 
-Use `reader.list_metrics()` to discover dotted metric paths. A missing metric
-raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.
+Use `reader.list_metrics()` to discover dotted metric paths. A missing requested
+metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.
 
 ## Project layout
 

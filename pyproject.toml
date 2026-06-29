@@ -48,3 +48,6 @@ pythonVersion = "3.10"
 typeCheckingMode = "strict"
 venv = ".venv"
 venvPath = "."
+
+[tool.pylint.messages_control]
+disable = ["R0914"]
