@@ -136,6 +136,21 @@ def test_empty_names_returns_all_metrics(tmp_path: Path) -> None:
     assert all(len(points) == 2 for points in result.values())
 
 
+def test_get_metric_skips_unrequested_metric_columns(tmp_path: Path) -> None:
+    """Selective decoding preserves deltas around an unrequested column."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "ignored": 100, "wanted": 10},
+        [[1000, 1000], [0, 5], [2, 0]],
+    )
+
+    result = FTDCReader(path).get_metric({"wanted"})
+
+    assert [point.value for point in result["wanted"]] == [10, 12, 12]
+
+
 def test_missing_metric_raises(tmp_path: Path) -> None:
     """A requested metric absent from every chunk raises a specific error."""
 

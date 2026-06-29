@@ -11,10 +11,11 @@ from pyftdc._codec import (
     DecodedChunk,
     decode_metric_document,
     iter_bson_documents,
-    timestamp_for_row,
+    metric_slots,
+    timestamp_for_value,
     value_for_slot,
 )
-from pyftdc.exceptions import FTDCError, MetricNotFoundError
+from pyftdc.exceptions import FTDCDecodeError, FTDCError, MetricNotFoundError
 from pyftdc.models import DataPoint
 
 
@@ -50,20 +51,33 @@ class FTDCReader:
         found_names: set[str] = set()
         point_numbers: dict[str, int] = {}
         points_by_name: dict[str, dict[datetime, DataPoint]] = {}
-        for chunk in self._metric_chunks(start_utc, end_utc):
+        selected_names = requested_names or None
+        for chunk in self._metric_chunks(start_utc, end_utc, selected_names):
             matching_slots = {
                 slot.path: (index, slot)
                 for index, slot in enumerate(chunk.slots)
-                if slot.part == 0 and (not requested_names or slot.path in requested_names)
+                if not requested_names or slot.path in requested_names
             }
             if not matching_slots:
                 continue
+            try:
+                timestamp_index = next(
+                    index
+                    for index, slot in enumerate(chunk.slots)
+                    if slot.path == "start" and slot.kind == "datetime"
+                )
+            except StopIteration as exc:
+                raise FTDCDecodeError(
+                    "metric reference document has no top-level datetime 'start'"
+                ) from exc
+
             found_names.update(matching_slots)
             for metric_name in matching_slots:
                 point_numbers.setdefault(metric_name, 0)
                 points_by_name.setdefault(metric_name, {})
-            for row in chunk.rows:
-                timestamp = timestamp_for_row(chunk, row)
+            timestamps = chunk.columns[timestamp_index]
+            for sample_index, raw_timestamp in enumerate(timestamps):
+                timestamp = timestamp_for_value(raw_timestamp)
                 if (start_utc is None or start_utc <= timestamp) and (
                     end_utc is None or timestamp <= end_utc
                 ):
@@ -74,7 +88,7 @@ class FTDCReader:
                             continue
                         points_by_name[metric_name][timestamp] = DataPoint(
                             timestamp=timestamp,
-                            value=value_for_slot(slot, row[metric_index]),
+                            value=value_for_slot(slot, chunk.columns[metric_index][sample_index]),
                         )
 
         missing_names = requested_names - found_names
@@ -91,20 +105,24 @@ class FTDCReader:
         """Return sorted dotted names for numeric fields in the source."""
 
         names: set[str] = set()
-        for chunk in self._metric_chunks():
-            names.update(slot.path for slot in chunk.slots)
+        for path in self._paths():
+            with path.open("rb") as stream:
+                for document in iter_bson_documents(stream, path):
+                    if document.get("type") == 1:
+                        names.update(slot.path for slot in metric_slots(document))
         return sorted(names)
 
     def _metric_chunks(
         self,
         start: datetime | None = None,
         end: datetime | None = None,
+        names: set[str] | None = None,
     ) -> Iterator[DecodedChunk]:
         for path in self._paths(start, end):
             with path.open("rb") as stream:
                 for document in iter_bson_documents(stream, path):
                     if document.get("type") == 1:
-                        yield decode_metric_document(document)
+                        yield decode_metric_document(document, names)
 
     def _paths(
         self,
@@ -156,8 +174,6 @@ def _time_from_filename(path: Path) -> datetime | None:
     if not separator or not sequence.isdigit():
         return None
     try:
-        return datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%SZ").replace(
-            tzinfo=timezone.utc
-        )
+        return datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%SZ").replace(tzinfo=timezone.utc)
     except ValueError:
         return None
