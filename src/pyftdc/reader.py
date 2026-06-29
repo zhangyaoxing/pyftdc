@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+import os
+from collections import deque
+from collections.abc import Collection, Iterator, Mapping
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
+from typing import Any
 
 from pyftdc._codec import (
     DecodedChunk,
@@ -29,17 +34,21 @@ class FTDCReader:
         if not self.source.is_file() and not self.source.is_dir():
             raise FTDCError(f"FTDC source is not a regular file or directory: {self.source}")
 
-    def get_metric(
+    def get_metric(  # pylint: disable=too-many-arguments
         self,
         name: set[str],
         start: datetime | None = None,
         end: datetime | None = None,
         sample_rate: float = 1.0,
         sort_by_timestamp: bool = False,
+        *,
+        workers: int | None = None,
     ) -> dict[str, list[DataPoint]]:
         """Return sampled observations by metric name in the inclusive UTC timespan.
 
         Points retain source traversal order unless ``sort_by_timestamp`` is true.
+        Metric chunks are decoded by ``workers`` processes. By default, the worker
+        count is one less than the number of CPUs, with a minimum of one.
         """
 
         requested_names = set(name)
@@ -51,12 +60,13 @@ class FTDCReader:
             raise ValueError("start must be before or equal to end")
         if not math.isfinite(sample_rate) or not 0 < sample_rate <= 1:
             raise ValueError("sample_rate must be greater than 0 and at most 1")
+        worker_count = _worker_count(workers)
 
         found_names: set[str] = set()
         point_numbers: dict[str, int] = {}
         points_by_name: dict[str, dict[datetime, DataPoint]] = {}
         selected_names = requested_names or None
-        for chunk in self._metric_chunks(start_utc, end_utc, selected_names):
+        for chunk in self._metric_chunks(start_utc, end_utc, selected_names, worker_count):
             matching_slots = {
                 slot.path: (index, slot)
                 for index, slot in enumerate(chunk.slots)
@@ -100,8 +110,7 @@ class FTDCReader:
             raise MetricNotFoundError(sorted(missing_names)[0])
         return {
             metric_name: [
-                points[timestamp]
-                for timestamp in (sorted(points) if sort_by_timestamp else points)
+                points[timestamp] for timestamp in (sorted(points) if sort_by_timestamp else points)
             ]
             for metric_name, points in sorted(points_by_name.items())
         }
@@ -124,12 +133,42 @@ class FTDCReader:
         start: datetime | None = None,
         end: datetime | None = None,
         names: set[str] | None = None,
+        workers: int = 1,
     ) -> Iterator[DecodedChunk]:
+        documents = self._metric_documents(start, end)
+        if workers == 1:
+            for document in documents:
+                yield decode_metric_document(document, names)
+            return
+
+        initial_documents = list(islice(documents, workers))
+        if len(initial_documents) < 2:
+            for document in initial_documents:
+                yield decode_metric_document(document, names)
+            return
+
+        effective_workers = min(workers, len(initial_documents))
+        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            pending: deque[Future[DecodedChunk]] = deque(
+                executor.submit(_decode_metric_document, document, names)
+                for document in initial_documents
+            )
+            for document in documents:
+                yield pending.popleft().result()
+                pending.append(executor.submit(_decode_metric_document, document, names))
+            while pending:
+                yield pending.popleft().result()
+
+    def _metric_documents(
+        self,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> Iterator[Mapping[str, Any]]:
         for path in self._paths(start, end):
             with path.open("rb") as stream:
                 for document in iter_bson_documents(stream, path):
                     if document.get("type") == 1:
-                        yield decode_metric_document(document, names)
+                        yield document
 
     def _paths(
         self,
@@ -173,6 +212,23 @@ def _as_utc(value: datetime, label: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _worker_count(workers: object = None) -> int:
+    if workers is None:
+        return max(1, (os.cpu_count() or 1) - 1)
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    return workers
+
+
+def _decode_metric_document(
+    document: Mapping[str, Any],
+    names: Collection[str] | None,
+) -> DecodedChunk:
+    """Decode a metric document in a worker process."""
+
+    return decode_metric_document(document, names)
 
 
 def _time_from_filename(path: Path) -> datetime | None:

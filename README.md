@@ -34,15 +34,22 @@ metrics = reader.get_metric(
     end=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
     sample_rate=0.1,
     sort_by_timestamp=False,
+    workers=None,
 )
 points = metrics["serverStatus.connections.current"]
 ```
 
 The source may be one `metrics.*` file or a directory that contains multiple metrics files.
-- Timespan endpoints are inclusive and must be timezone-aware. Omit `start` or `end` to use the earliest or latest timestamp in the source. 
-- The result maps each requested name to points in source traversal order. Pass `sort_by_timestamp=True` to force order each point list by UTC timestamp (Usually unnecessary).
+- Timespan endpoints are inclusive and must be timezone-aware. Omit `start` or 
+  `end` to use the earliest or latest timestamp in the source. 
+- The result maps each requested name to points in source traversal order. 
+  Pass `sort_by_timestamp=True` to force order each point list by UTC timestamp (Usually unnecessary).
 - Pass an empty set to read every metric. 
-- `sample_rate` must be greater than 0 and at most 1. For example, `0.1` returns approximately 10% of points. Its default is `1.0`.
+- `sample_rate` must be greater than 0 and at most 1. For example, `0.1` returns approximately 
+  10% of points. Its default is `1.0`.
+- Metric chunks are decoded in separate processes. By default, `workers` is the
+  detected CPU count minus one, with a minimum of one. Set `workers=1` to disable
+  multiprocessing or choose a smaller value to limit memory use.
 - `query()` is an alias for `get_metric()`.
 - Use `reader.list_metrics()` to discover dotted metric paths. 
 - A missing requested metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.

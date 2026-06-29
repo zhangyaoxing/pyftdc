@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import pyftdc.reader as reader_module
 from pyftdc import FTDCReader, MetricNotFoundError
 from tests.conftest import write_ftdc
 
@@ -48,6 +49,27 @@ def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
     assert list(result) == ["other", "value"]
     assert [point.value for point in result["value"]] == [1, 2, 3]
     assert [point.value for point in result["other"]] == [10, 12, 14]
+
+
+def test_get_metric_decodes_chunks_in_parallel_in_source_order(tmp_path: Path) -> None:
+    """Parallel decoding does not change chunk traversal order."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 1},
+        [[], []],
+    )
+    second = write_ftdc(
+        tmp_path / "second",
+        {"start": start + timedelta(seconds=1), "value": 2},
+        [[], []],
+    )
+    path.write_bytes(path.read_bytes() + second.read_bytes())
+
+    result = FTDCReader(path).get_metric({"value"}, workers=2)
+
+    assert [point.value for point in result["value"]] == [1, 2]
 
 
 def test_get_metric_optionally_sorts_points_by_timestamp(tmp_path: Path) -> None:
@@ -239,3 +261,20 @@ def test_rejects_invalid_sample_rate(tmp_path: Path, sample_rate: float) -> None
 
     with pytest.raises(ValueError, match="sample_rate"):
         reader.get_metric({"value"}, start, start, sample_rate=sample_rate)
+
+
+def test_default_worker_count_leaves_one_cpu_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default uses all detected CPUs except one."""
+
+    monkeypatch.setattr(reader_module.os, "cpu_count", lambda: 8)
+
+    # pylint: disable-next=protected-access
+    assert reader_module._worker_count(None) == 7  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("workers", [0, -1, True])
+def test_rejects_invalid_worker_count(tmp_path: Path, workers: int) -> None:
+    """Worker counts must be positive integers."""
+
+    with pytest.raises(ValueError, match="workers"):
+        FTDCReader(tmp_path).get_metric({"value"}, workers=workers)
