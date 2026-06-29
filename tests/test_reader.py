@@ -50,6 +50,76 @@ def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
     assert [point.value for point in result["other"]] == [10, 12, 14]
 
 
+def test_omitted_timespan_reads_earliest_through_latest_in_folder(tmp_path: Path) -> None:
+    """Omitted bounds include every sample across all files in the folder."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    write_ftdc(tmp_path / "metrics.1", {"start": start, "value": 1}, [[], []])
+    write_ftdc(
+        tmp_path / "metrics.2",
+        {"start": start + timedelta(hours=1), "value": 2},
+        [[], []],
+    )
+
+    result = FTDCReader(tmp_path).get_metric({"value"})
+
+    assert [point.timestamp for point in result["value"]] == [
+        start,
+        start + timedelta(hours=1),
+    ]
+    assert [point.value for point in result["value"]] == [1, 2]
+
+
+def test_each_timespan_bound_can_be_omitted(tmp_path: Path) -> None:
+    """Either omitted bound expands to the corresponding archive endpoint."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 0},
+        [[1000, 1000], [1, 1]],
+    )
+    reader = FTDCReader(path)
+
+    through_middle = reader.get_metric({"value"}, end=start + timedelta(seconds=1))
+    from_middle = reader.get_metric({"value"}, start=start + timedelta(seconds=1))
+
+    assert [point.value for point in through_middle["value"]] == [0, 1]
+    assert [point.value for point in from_middle["value"]] == [1, 2]
+
+
+def test_start_bound_skips_older_timestamped_files(tmp_path: Path) -> None:
+    """Files before the start candidate are not opened."""
+
+    start = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    (tmp_path / "metrics.2026-01-01T00-00-00Z-00000").write_bytes(b"not BSON")
+    write_ftdc(
+        tmp_path / "metrics.2026-01-02T00-00-00Z-00000",
+        {"start": start, "value": 1},
+        [[], []],
+    )
+
+    result = FTDCReader(tmp_path).get_metric({"value"}, start=start)
+
+    assert [point.value for point in result["value"]] == [1]
+
+
+def test_end_bound_skips_newer_timestamped_files(tmp_path: Path) -> None:
+    """Files starting after the end bound are not opened."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    write_ftdc(
+        tmp_path / "metrics.2026-01-01T00-00-00Z-00000",
+        {"start": start, "value": 1},
+        [[], []],
+    )
+    (tmp_path / "metrics.2026-01-02T00-00-00Z-00000").write_bytes(b"not BSON")
+
+    result = FTDCReader(tmp_path).get_metric({"value"}, end=start)
+
+    assert [point.value for point in result["value"]] == [1]
+
+
 def test_empty_names_returns_all_metrics(tmp_path: Path) -> None:
     """An empty name set selects every metric in the archive."""
 

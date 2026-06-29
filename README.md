@@ -37,7 +37,8 @@ points = metrics["serverStatus.connections.current"]
 ```
 
 The source may be one `metrics.*` file or a `diagnostic.data` directory.
-Timespan endpoints are inclusive and must be timezone-aware. The result maps each
+Timespan endpoints are inclusive and must be timezone-aware. Omit `start` or
+`end` to use the earliest or latest timestamp in the source. The result maps each
 requested name to points ordered by UTC timestamp. Pass an empty set to read every
 metric. `sample_rate` must be greater than 0 and at most 1;
 for example, `0.1` returns approximately 10% of points. Its default is `1.0`.
