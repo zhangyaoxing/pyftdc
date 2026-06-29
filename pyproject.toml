@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pyftdc"
+name = "pymongoftdc"
 version = "0.1.0"
 description = "A typed reader for MongoDB FTDC metric archives"
 readme = "README.md"
