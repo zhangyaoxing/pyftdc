@@ -33,20 +33,19 @@ metrics = reader.get_metric(
     start=datetime(2026, 1, 1, tzinfo=timezone.utc),
     end=datetime(2026, 1, 1, 1, tzinfo=timezone.utc),
     sample_rate=0.1,
+    sort_by_timestamp=False,
 )
 points = metrics["serverStatus.connections.current"]
 ```
 
-The source may be one `metrics.*` file or a `diagnostic.data` directory.
-Timespan endpoints are inclusive and must be timezone-aware. Omit `start` or
-`end` to use the earliest or latest timestamp in the source. The result maps each
-requested name to points ordered by UTC timestamp. Pass an empty set to read every
-metric. `sample_rate` must be greater than 0 and at most 1;
-for example, `0.1` returns approximately 10% of points. Its default is `1.0`.
-`query()` is an alias for `get_metric()`.
-
-Use `reader.list_metrics()` to discover dotted metric paths. A missing requested
-metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.
+The source may be one `metrics.*` file or a directory that contains multiple metrics files.
+- Timespan endpoints are inclusive and must be timezone-aware. Omit `start` or `end` to use the earliest or latest timestamp in the source. 
+- The result maps each requested name to points in source traversal order. Pass `sort_by_timestamp=True` to force order each point list by UTC timestamp (Usually unnecessary).
+- Pass an empty set to read every metric. 
+- `sample_rate` must be greater than 0 and at most 1. For example, `0.1` returns approximately 10% of points. Its default is `1.0`.
+- `query()` is an alias for `get_metric()`.
+- Use `reader.list_metrics()` to discover dotted metric paths. 
+- A missing requested metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.
 
 ## Project layout
 

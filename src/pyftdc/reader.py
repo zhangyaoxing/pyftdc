@@ -35,8 +35,12 @@ class FTDCReader:
         start: datetime | None = None,
         end: datetime | None = None,
         sample_rate: float = 1.0,
+        sort_by_timestamp: bool = False,
     ) -> dict[str, list[DataPoint]]:
-        """Return sampled observations by metric name in the inclusive UTC timespan."""
+        """Return sampled observations by metric name in the inclusive UTC timespan.
+
+        Points retain source traversal order unless ``sort_by_timestamp`` is true.
+        """
 
         requested_names = set(name)
         if "" in requested_names:
@@ -95,7 +99,10 @@ class FTDCReader:
         if missing_names:
             raise MetricNotFoundError(sorted(missing_names)[0])
         return {
-            metric_name: [points[timestamp] for timestamp in sorted(points)]
+            metric_name: [
+                points[timestamp]
+                for timestamp in (sorted(points) if sort_by_timestamp else points)
+            ]
             for metric_name, points in sorted(points_by_name.items())
         }
 

@@ -34,7 +34,7 @@ def test_get_metric_filters_timespan_and_decodes_deltas(tmp_path: Path) -> None:
 
 
 def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
-    """A query returns a separate ordered point list for each requested metric."""
+    """A query returns a separate point list for each requested metric."""
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = write_ftdc(
@@ -48,6 +48,32 @@ def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
     assert list(result) == ["other", "value"]
     assert [point.value for point in result["value"]] == [1, 2, 3]
     assert [point.value for point in result["other"]] == [10, 12, 14]
+
+
+def test_get_metric_optionally_sorts_points_by_timestamp(tmp_path: Path) -> None:
+    """Points retain source order by default and can be sorted on request."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 0},
+        [[2000, (1 << 64) - 1000], [1, 1]],
+    )
+    reader = FTDCReader(path)
+
+    source_order = reader.get_metric({"value"})["value"]
+    sorted_order = reader.get_metric({"value"}, sort_by_timestamp=True)["value"]
+
+    assert [point.timestamp for point in source_order] == [
+        start,
+        start + timedelta(seconds=2),
+        start + timedelta(seconds=1),
+    ]
+    assert [(point.timestamp, point.value) for point in sorted_order] == [
+        (start, 0),
+        (start + timedelta(seconds=1), 2),
+        (start + timedelta(seconds=2), 1),
+    ]
 
 
 def test_omitted_timespan_reads_earliest_through_latest_in_folder(tmp_path: Path) -> None:
