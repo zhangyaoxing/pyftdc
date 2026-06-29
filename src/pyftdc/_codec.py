@@ -40,7 +40,7 @@ class DecodedChunk:
 
     reference: Mapping[str, Any]
     slots: tuple[MetricSlot, ...]
-    columns: tuple[tuple[int, ...], ...]
+    columns: tuple[list[int], ...]
 
 
 def iter_bson_documents(stream: BinaryIO, source: Path) -> Iterator[Mapping[str, Any]]:
@@ -90,6 +90,41 @@ def metric_slots(document: Mapping[str, Any]) -> tuple[MetricSlot, ...]:
 
     _, slots, _, _ = _metric_parts(document)
     return slots
+
+
+def peek_chunk_timespan(
+    document: Mapping[str, Any],
+) -> tuple[datetime, int] | None:
+    """Return (start_timestamp, sample_count) without decoding metric columns.
+
+    Returns None when the document is not a metric chunk or has no start field.
+    """
+
+    payload = document.get("data", document.get("doc"))
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        return None
+    data = payload.tobytes() if isinstance(payload, memoryview) else bytes(payload)
+    if len(data) < 5:
+        return None
+    (expected_size,) = struct.unpack_from("<I", data)
+    try:
+        raw = zlib.decompress(data[4:])
+    except zlib.error:
+        return None
+    if len(raw) != expected_size or len(raw) < _MIN_BSON_SIZE:
+        return None
+    (reference_size,) = struct.unpack_from("<I", raw)
+    if reference_size < _MIN_BSON_SIZE or reference_size + 8 > len(raw):
+        return None
+    try:
+        reference = BSON(raw[:reference_size]).decode(codec_options=_CODEC_OPTIONS)
+    except Exception:
+        return None
+    start = reference.get("start")
+    if not isinstance(start, datetime):
+        return None
+    delta_count = struct.unpack_from("<I", raw, reference_size + 4)[0]
+    return start, delta_count
 
 
 def _metric_parts(
@@ -266,13 +301,15 @@ def _decode_columns(
     return tuple(selected[index] for index in selected_indices)
 
 
-def _accumulate_column(initial: int, deltas: list[int]) -> tuple[int, ...]:
+def _accumulate_column(initial: int, deltas: list[int]) -> list[int]:
+    n = len(deltas)
+    values = [0] * (n + 1)
     current = initial
-    values = [current]
-    for delta in deltas:
+    values[0] = current
+    for i, delta in enumerate(deltas, 1):
         current = (current + delta) & _UINT64_MASK
-        values.append(current)
-    return tuple(values)
+        values[i] = current
+    return values
 
 
 def _as_signed(value: int) -> int:

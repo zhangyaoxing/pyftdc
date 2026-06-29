@@ -17,6 +17,7 @@ from pyftdc._codec import (
     decode_metric_document,
     iter_bson_documents,
     metric_slots,
+    peek_chunk_timespan,
     timestamp_for_value,
     value_for_slot,
 )
@@ -66,6 +67,8 @@ class FTDCReader:
         point_numbers: dict[str, int] = {}
         points_by_name: dict[str, dict[datetime, DataPoint]] = {}
         selected_names = requested_names or None
+        time_bounded = start_utc is not None or end_utc is not None
+        do_sample = sample_rate < 1.0
         for chunk in self._metric_chunks(start_utc, end_utc, selected_names, worker_count):
             matching_slots = {
                 slot.path: (index, slot)
@@ -87,19 +90,31 @@ class FTDCReader:
 
             found_names.update(matching_slots)
             for metric_name in matching_slots:
-                point_numbers.setdefault(metric_name, 0)
-                points_by_name.setdefault(metric_name, {})
+                if metric_name not in point_numbers:
+                    point_numbers[metric_name] = 0
+                    points_by_name[metric_name] = {}
             timestamps = chunk.columns[timestamp_index]
             for sample_index, raw_timestamp in enumerate(timestamps):
                 timestamp = timestamp_for_value(raw_timestamp)
-                if (start_utc is None or start_utc <= timestamp) and (
-                    end_utc is None or timestamp <= end_utc
+                if time_bounded and (
+                    (start_utc is not None and timestamp < start_utc)
+                    or (end_utc is not None and timestamp > end_utc)
                 ):
+                    continue
+                if do_sample:
                     for metric_name, (metric_index, slot) in matching_slots.items():
                         point_number = point_numbers[metric_name] + 1
                         point_numbers[metric_name] = point_number
-                        if int(point_number * sample_rate) == int((point_number - 1) * sample_rate):
+                        if int(point_number * sample_rate) == int(
+                            (point_number - 1) * sample_rate
+                        ):
                             continue
+                        points_by_name[metric_name][timestamp] = DataPoint(
+                            timestamp=timestamp,
+                            value=value_for_slot(slot, chunk.columns[metric_index][sample_index]),
+                        )
+                else:
+                    for metric_name, (metric_index, slot) in matching_slots.items():
                         points_by_name[metric_name][timestamp] = DataPoint(
                             timestamp=timestamp,
                             value=value_for_slot(slot, chunk.columns[metric_index][sample_index]),
@@ -136,26 +151,36 @@ class FTDCReader:
         workers: int = 1,
     ) -> Iterator[DecodedChunk]:
         documents = self._metric_documents(start, end)
-        if workers == 1:
-            for document in documents:
-                yield decode_metric_document(document, names)
+
+        def _in_range(document: Mapping[str, Any]) -> bool:
+            if start is None and end is None:
+                return True
+            timespan = peek_chunk_timespan(document)
+            if timespan is None:
+                return True
+            chunk_start, sample_count = timespan
+            if end is not None and chunk_start > end:
+                return False
+            if start is not None and chunk_start.timestamp() + sample_count < start.timestamp():
+                return False
+            return True
+
+        in_range_docs = [doc for doc in documents if _in_range(doc)]
+
+        if workers == 1 or len(in_range_docs) < 2:
+            for doc in in_range_docs:
+                yield decode_metric_document(doc, names)
             return
 
-        initial_documents = list(islice(documents, workers))
-        if len(initial_documents) < 2:
-            for document in initial_documents:
-                yield decode_metric_document(document, names)
-            return
-
-        effective_workers = min(workers, len(initial_documents))
+        effective_workers = min(workers, len(in_range_docs))
         with ProcessPoolExecutor(max_workers=effective_workers) as executor:
             pending: deque[Future[DecodedChunk]] = deque(
-                executor.submit(_decode_metric_document, document, names)
-                for document in initial_documents
+                executor.submit(_decode_metric_document, doc, names)
+                for doc in islice(in_range_docs, effective_workers)
             )
-            for document in documents:
+            for doc in islice(in_range_docs, effective_workers, None):
                 yield pending.popleft().result()
-                pending.append(executor.submit(_decode_metric_document, document, names))
+                pending.append(executor.submit(_decode_metric_document, doc, names))
             while pending:
                 yield pending.popleft().result()
 
