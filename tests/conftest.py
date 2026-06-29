@@ -27,7 +27,7 @@ def write_ftdc(
         + b"".join(_varint(value) for value in compacted)
     )
     payload = struct.pack("<I", len(raw)) + zlib.compress(raw)
-    path.write_bytes(BSON.encode({"type": 1, "doc": Binary(payload)}))
+    path.write_bytes(BSON.encode({"type": 1, "data": Binary(payload)}))
     return path
 
 

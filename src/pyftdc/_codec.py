@@ -101,9 +101,9 @@ def decode_metric_document(document: Mapping[str, Any]) -> DecodedChunk:
 def _decompress_payload(document: Mapping[str, Any]) -> bytes:
     """Validate and decompress the binary payload of a metric document."""
 
-    payload = document.get("doc")
+    payload = document.get("data", document.get("doc"))
     if not isinstance(payload, (bytes, bytearray, memoryview)):
-        raise FTDCDecodeError("metric document has no binary 'doc' field")
+        raise FTDCDecodeError("metric document has no binary 'data' or 'doc' field")
     data = payload.tobytes() if isinstance(payload, memoryview) else bytes(payload)
     if len(data) < 5:
         raise FTDCDecodeError("compressed metric chunk is too short")
