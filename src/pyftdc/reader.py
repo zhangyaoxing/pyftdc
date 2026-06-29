@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,8 +28,14 @@ class FTDCReader:
         if not self.source.is_file() and not self.source.is_dir():
             raise FTDCError(f"FTDC source is not a regular file or directory: {self.source}")
 
-    def get_metric(self, name: str, start: datetime, end: datetime) -> list[DataPoint]:
-        """Return observations for dotted metric *name* in the inclusive UTC timespan."""
+    def get_metric(
+        self,
+        name: str,
+        start: datetime,
+        end: datetime,
+        sample_rate: float = 1.0,
+    ) -> list[DataPoint]:
+        """Return sampled observations for *name* in the inclusive UTC timespan."""
 
         if not name:
             raise ValueError("metric name must not be empty")
@@ -36,8 +43,11 @@ class FTDCReader:
         end_utc = _as_utc(end, "end")
         if start_utc > end_utc:
             raise ValueError("start must be before or equal to end")
+        if not math.isfinite(sample_rate) or not 0 < sample_rate <= 1:
+            raise ValueError("sample_rate must be greater than 0 and at most 1")
 
         found = False
+        point_number = 0
         points_by_time: dict[datetime, DataPoint] = {}
         for chunk in self._metric_chunks():
             matching_indexes = [
@@ -53,6 +63,9 @@ class FTDCReader:
             for row in chunk.rows:
                 timestamp = timestamp_for_row(chunk, row)
                 if start_utc <= timestamp <= end_utc:
+                    point_number += 1
+                    if int(point_number * sample_rate) == int((point_number - 1) * sample_rate):
+                        continue
                     points_by_time[timestamp] = DataPoint(
                         timestamp=timestamp,
                         value=value_for_slot(slot, row[metric_index]),

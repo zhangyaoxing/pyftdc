@@ -49,3 +49,36 @@ def test_rejects_naive_timespan(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="timezone-aware"):
         reader.get_metric("value", datetime(2026, 1, 1), datetime(2026, 1, 2))
+
+
+def test_get_metric_samples_points(tmp_path: Path) -> None:
+    """A sample rate uniformly skips points within the requested timespan."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(
+        tmp_path / "metrics.interim",
+        {"start": start, "value": 0},
+        [[1000] * 9, [1] * 9],
+    )
+
+    points = FTDCReader(path).get_metric(
+        "value",
+        start,
+        start + timedelta(seconds=9),
+        sample_rate=0.1,
+    )
+
+    assert [(point.timestamp, point.value) for point in points] == [
+        (start + timedelta(seconds=9), 9)
+    ]
+
+
+@pytest.mark.parametrize("sample_rate", [0, -0.1, 1.1, float("nan"), float("inf")])
+def test_rejects_invalid_sample_rate(tmp_path: Path, sample_rate: float) -> None:
+    """A sample rate must be finite and in the interval (0, 1]."""
+
+    reader = FTDCReader(tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="sample_rate"):
+        reader.get_metric("value", start, start, sample_rate=sample_rate)
