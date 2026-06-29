@@ -1,5 +1,9 @@
 # pyftdc
 
+[![CI](https://github.com/zhangyaoxing/pyftdc/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zhangyaoxing/pyftdc/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
 `pyftdc` reads numeric time-series metrics directly from MongoDB Full-Time
 Diagnostic Data Capture (FTDC) archive files.
 
