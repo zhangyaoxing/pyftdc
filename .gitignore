@@ -206,6 +206,9 @@ tempCodeRunnerFile.py
 # Ruff stuff:
 .ruff_cache/
 
+# Qwen Code
+.qwen/
+
 # PyPI configuration file
 .pypirc
 
