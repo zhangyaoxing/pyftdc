@@ -12,6 +12,7 @@ license = { file = "LICENSE" }
 dependencies = ["pymongo>=4.6,<5"]
 
 [project.optional-dependencies]
+docs = ["pdoc>=16,<17"]
 test = [
   "pylint>=3",
   "pyright>=1.1.400",
