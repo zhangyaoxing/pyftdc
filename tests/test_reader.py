@@ -72,43 +72,62 @@ def test_list_metrics_reads_only_first_chunk_by_default(tmp_path: Path) -> None:
     assert reader.list_metrics(all_chunks=True) == ["first", "later", "start"]
 
 
-def test_get_config_returns_parsed_mongodb_config(tmp_path: Path) -> None:
-    """MongoDB's parsed command-line options are extracted from FTDC metadata."""
+def test_get_metadata_returns_complete_metadata_and_mongodb_config(tmp_path: Path) -> None:
+    """Metadata is returned whole while config returns only parsed command-line options."""
 
     config = {
         "net": {"bindIp": "127.0.0.1", "port": 27017},
         "security": {"authorization": "enabled"},
     }
+    metadata = {
+        "buildInfo": {"version": "8.0.0"},
+        "hostInfo": {"system": {"hostname": "mongodb.example"}},
+        "getCmdLineOpts": {
+            "argv": ["mongod", "--config", "/etc/mongod.conf"],
+            "parsed": config,
+            "ok": 1,
+        },
+    }
     path = tmp_path / "metrics.interim"
-    path.write_bytes(
-        BSON.encode(
-            {
-                "type": 0,
-                "doc": {
-                    "getCmdLineOpts": {
-                        "argv": ["mongod", "--config", "/etc/mongod.conf"],
-                        "parsed": config,
-                        "ok": 1,
-                    }
-                },
-            }
-        )
-    )
+    path.write_bytes(BSON.encode({"type": 0, "doc": metadata}))
 
     reader = FTDCReader(path)
 
-    assert reader.get_config() == config
+    assert reader.get_metadata() == metadata
     assert reader.get_mongodb_config() == config
 
 
-def test_get_config_raises_when_config_is_absent(tmp_path: Path) -> None:
-    """A source without configuration metadata reports a library-level error."""
+def test_get_metadata_raises_when_metadata_is_absent(tmp_path: Path) -> None:
+    """A source without metadata reports a library-level error."""
 
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     path = write_ftdc(tmp_path / "metrics.interim", {"start": start, "value": 1}, [[], []])
 
+    with pytest.raises(FTDCError, match="metadata not found"):
+        FTDCReader(path).get_metadata()
+
+
+def test_get_metadata_only_reads_first_file(tmp_path: Path) -> None:
+    """Metadata in later files is not substituted for missing first-file metadata."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    write_ftdc(tmp_path / "metrics.1", {"start": start, "value": 1}, [[], []])
+    (tmp_path / "metrics.2").write_bytes(
+        BSON.encode({"type": 0, "doc": {"buildInfo": {"version": "8.0.0"}}})
+    )
+
+    with pytest.raises(FTDCError, match="metadata not found"):
+        FTDCReader(tmp_path).get_metadata()
+
+
+def test_get_mongodb_config_raises_when_options_are_absent(tmp_path: Path) -> None:
+    """Metadata without command-line options has no MongoDB configuration."""
+
+    path = tmp_path / "metrics.interim"
+    path.write_bytes(BSON.encode({"type": 0, "doc": {"buildInfo": {"version": "8.0.0"}}}))
+
     with pytest.raises(FTDCError, match="configuration not found"):
-        FTDCReader(path).get_config()
+        FTDCReader(path).get_mongodb_config()
 
 
 def test_get_metric_decodes_chunks_in_parallel_in_source_order(tmp_path: Path) -> None:
