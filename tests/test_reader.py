@@ -51,6 +51,26 @@ def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
     assert [point.value for point in result["other"]] == [10, 12, 14]
 
 
+def test_list_metrics_reads_only_first_chunk_by_default(tmp_path: Path) -> None:
+    """Metric discovery uses the first chunk unless a complete scan is requested."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    write_ftdc(
+        tmp_path / "metrics.1",
+        {"start": start, "first": 1},
+        [[], []],
+    )
+    write_ftdc(
+        tmp_path / "metrics.2",
+        {"start": start + timedelta(seconds=1), "later": 2},
+        [[], []],
+    )
+    reader = FTDCReader(tmp_path)
+
+    assert reader.list_metrics() == ["first", "start"]
+    assert reader.list_metrics(all_chunks=True) == ["first", "later", "start"]
+
+
 def test_get_metric_decodes_chunks_in_parallel_in_source_order(tmp_path: Path) -> None:
     """Parallel decoding does not change chunk traversal order."""
 

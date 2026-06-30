@@ -132,8 +132,12 @@ class FTDCReader:
 
     query = get_metric
 
-    def list_metrics(self) -> list[str]:
-        """Return sorted dotted names for numeric fields in the source."""
+    def list_metrics(self, *, all_chunks: bool = False) -> list[str]:
+        """Return sorted dotted names for numeric fields in the source.
+
+        By default, inspect only the first metric chunk. Set ``all_chunks`` to
+        scan the complete source and include metrics introduced by later chunks.
+        """
 
         names: set[str] = set()
         for path in self._paths():
@@ -141,6 +145,8 @@ class FTDCReader:
                 for document in iter_bson_documents(stream, path):
                     if document.get("type") == 1:
                         names.update(slot.path for slot in metric_slots(document))
+                        if not all_chunks:
+                            return sorted(names)
         return sorted(names)
 
     def _metric_chunks(
@@ -161,9 +167,10 @@ class FTDCReader:
             chunk_start, sample_count = timespan
             if end is not None and chunk_start > end:
                 return False
-            if start is not None and chunk_start.timestamp() + sample_count < start.timestamp():
-                return False
-            return True
+            return (
+                start is None
+                or chunk_start.timestamp() + sample_count >= start.timestamp()
+            )
 
         in_range_docs = [doc for doc in documents if _in_range(doc)]
 

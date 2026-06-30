@@ -51,7 +51,8 @@ The source may be one `metrics.*` file or a directory that contains multiple met
   detected CPU count minus one, with a minimum of one. Set `workers=1` to disable
   multiprocessing or choose a smaller value to limit memory use.
 - `query()` is an alias for `get_metric()`.
-- Use `reader.list_metrics()` to discover dotted metric paths. 
+- Use `reader.list_metrics()` to discover dotted metric paths from the first metric
+  chunk. Pass `all_chunks=True` to scan the full source for schema changes.
 - A missing requested metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.
 
 ## Project layout
