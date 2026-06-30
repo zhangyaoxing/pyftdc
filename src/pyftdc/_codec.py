@@ -14,6 +14,7 @@ from typing import Any, BinaryIO, cast
 from bson import BSON
 from bson.codec_options import CodecOptions
 from bson.decimal128 import Decimal128
+from bson.errors import InvalidBSON
 from bson.timestamp import Timestamp
 
 from pyftdc.exceptions import FTDCDecodeError
@@ -59,7 +60,7 @@ def iter_bson_documents(stream: BinaryIO, source: Path) -> Iterator[Mapping[str,
             raise FTDCDecodeError(f"{source}: truncated BSON document")
         try:
             yield BSON(prefix + remainder).decode(codec_options=_CODEC_OPTIONS)
-        except Exception as exc:
+        except InvalidBSON as exc:
             raise FTDCDecodeError(f"{source}: invalid BSON document") from exc
 
 
@@ -100,31 +101,49 @@ def peek_chunk_timespan(
     Returns None when the document is not a metric chunk or has no start field.
     """
 
+    compressed = _compressed_payload(document)
+    if compressed is None:
+        return None
+    expected_size, data = compressed
+    try:
+        raw = zlib.decompress(data)
+    except zlib.error:
+        return None
+    if len(raw) != expected_size or len(raw) < _MIN_BSON_SIZE:
+        return None
+
+    reference_parts = _peek_reference(raw)
+    if reference_parts is None:
+        return None
+    reference, reference_size = reference_parts
+    start = reference.get("start")
+    if not isinstance(start, datetime):
+        return None
+    delta_count = struct.unpack_from("<I", raw, reference_size + 4)[0]
+    return start, delta_count
+
+
+def _compressed_payload(
+    document: Mapping[str, Any],
+) -> tuple[int, bytes] | None:
     payload = document.get("data", document.get("doc"))
     if not isinstance(payload, (bytes, bytearray, memoryview)):
         return None
     data = payload.tobytes() if isinstance(payload, memoryview) else bytes(payload)
     if len(data) < 5:
         return None
-    (expected_size,) = struct.unpack_from("<I", data)
-    try:
-        raw = zlib.decompress(data[4:])
-    except zlib.error:
-        return None
-    if len(raw) != expected_size or len(raw) < _MIN_BSON_SIZE:
-        return None
+    return struct.unpack_from("<I", data)[0], data[4:]
+
+
+def _peek_reference(raw: bytes) -> tuple[Mapping[str, Any], int] | None:
     (reference_size,) = struct.unpack_from("<I", raw)
     if reference_size < _MIN_BSON_SIZE or reference_size + 8 > len(raw):
         return None
     try:
         reference = BSON(raw[:reference_size]).decode(codec_options=_CODEC_OPTIONS)
-    except Exception:
+    except InvalidBSON:
         return None
-    start = reference.get("start")
-    if not isinstance(start, datetime):
-        return None
-    delta_count = struct.unpack_from("<I", raw, reference_size + 4)[0]
-    return start, delta_count
+    return reference, reference_size
 
 
 def _metric_parts(
@@ -139,7 +158,7 @@ def _metric_parts(
         raise FTDCDecodeError("invalid reference document size")
     try:
         reference = BSON(raw[:reference_size]).decode(codec_options=_CODEC_OPTIONS)
-    except Exception as exc:
+    except InvalidBSON as exc:
         raise FTDCDecodeError("invalid metric reference document") from exc
 
     metric_count, delta_count = struct.unpack_from("<II", raw, reference_size)
@@ -237,24 +256,8 @@ def _decode_columns(
     selected: dict[int, list[int]] = {index: [] for index in selected_indices}
     position = 0
     logical_position = 0
-    data_length = len(data)
     while logical_position < expected_count:
-        value = 0
-        shift = 0
-        while True:
-            if position >= data_length:
-                raise FTDCDecodeError("truncated varint metric data")
-            byte = data[position]
-            position += 1
-            value |= (byte & 0x7F) << shift
-            if not byte & 0x80:
-                if value > _UINT64_MASK:
-                    raise FTDCDecodeError("varint exceeds uint64")
-                break
-            shift += 7
-            if shift >= 70:
-                raise FTDCDecodeError("varint exceeds uint64")
-
+        value, position = _read_varint(data, position)
         if value:
             metric_index = logical_position // delta_count if delta_count else 0
             if metric_index in selected:
@@ -262,43 +265,56 @@ def _decode_columns(
             logical_position += 1
             continue
 
-        run_minus_one = 0
-        shift = 0
-        while True:
-            if position >= data_length:
-                raise FTDCDecodeError("truncated varint metric data")
-            byte = data[position]
-            position += 1
-            run_minus_one |= (byte & 0x7F) << shift
-            if not byte & 0x80:
-                if run_minus_one > _UINT64_MASK:
-                    raise FTDCDecodeError("varint exceeds uint64")
-                break
-            shift += 7
-            if shift >= 70:
-                raise FTDCDecodeError("varint exceeds uint64")
-
+        run_minus_one, position = _read_varint(data, position)
         run_length = run_minus_one + 1
         run_end = logical_position + run_length
         if run_end > expected_count:
             raise FTDCDecodeError("zero run exceeds declared metric data")
-        if delta_count:
-            first_metric = logical_position // delta_count
-            last_metric = (run_end - 1) // delta_count
-            for metric_index in range(first_metric, last_metric + 1):
-                column = selected.get(metric_index)
-                if column is None:
-                    continue
-                column_start = metric_index * delta_count
-                overlap_start = max(logical_position, column_start)
-                overlap_end = min(run_end, column_start + delta_count)
-                column.extend([0] * (overlap_end - overlap_start))
+        _append_zero_run(selected, logical_position, run_end, delta_count)
         logical_position = run_end
-    if position != data_length:
+    if position != len(data):
         raise FTDCDecodeError("unexpected bytes after compressed metric data")
     if any(len(column) != delta_count for column in selected.values()):
         raise FTDCDecodeError("invalid selected metric column length")
     return tuple(selected[index] for index in selected_indices)
+
+
+def _read_varint(data: memoryview, position: int) -> tuple[int, int]:
+    value = 0
+    shift = 0
+    while True:
+        if position >= len(data):
+            raise FTDCDecodeError("truncated varint metric data")
+        byte = data[position]
+        position += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            if value > _UINT64_MASK:
+                raise FTDCDecodeError("varint exceeds uint64")
+            return value, position
+        shift += 7
+        if shift >= 70:
+            raise FTDCDecodeError("varint exceeds uint64")
+
+
+def _append_zero_run(
+    selected: Mapping[int, list[int]],
+    run_start: int,
+    run_end: int,
+    delta_count: int,
+) -> None:
+    if not delta_count:
+        return
+    first_metric = run_start // delta_count
+    last_metric = (run_end - 1) // delta_count
+    for metric_index in range(first_metric, last_metric + 1):
+        column = selected.get(metric_index)
+        if column is None:
+            continue
+        column_start = metric_index * delta_count
+        overlap_start = max(run_start, column_start)
+        overlap_end = min(run_end, column_start + delta_count)
+        column.extend([0] * (overlap_end - overlap_start))
 
 
 def _accumulate_column(initial: int, deltas: list[int]) -> list[int]:

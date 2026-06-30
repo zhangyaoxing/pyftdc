@@ -52,7 +52,13 @@ The source may be one `metrics.*` file or a directory that contains multiple met
   multiprocessing or choose a smaller value to limit memory use.
 - `query()` is an alias for `get_metric()`.
 - Use `reader.get_metadata()` to return the complete metadata payload from the first source file.
-  `reader.get_mongodb_config()` returns its parsed `getCmdLineOpts` configuration.
+  Dedicated metadata accessors are:
+  - `get_mongodb_config()` for the parsed `getCmdLineOpts` configuration
+  - `get_build_info()` for MongoDB version and build details
+  - `get_host_info()` for operating-system and hardware details
+  - `get_ulimits()` for process resource limits
+  - `get_sys_max_open_files()` for the system-wide open-file limit
+  - `get_metadata_start()` and `get_metadata_end()` for collection timestamps
 - Use `reader.list_metrics()` to discover dotted metric paths from the first metric
   chunk. Pass `all_chunks=True` to scan the full source for schema changes.
 - A missing requested metric raises `MetricNotFoundError`; an invalid archive raises `FTDCDecodeError`.

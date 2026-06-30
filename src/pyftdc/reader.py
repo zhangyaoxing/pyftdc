@@ -53,15 +53,9 @@ class FTDCReader:
         """
 
         requested_names = set(name)
-        if "" in requested_names:
-            raise ValueError("metric names must not be empty")
-        start_utc = _as_utc(start, "start") if start is not None else None
-        end_utc = _as_utc(end, "end") if end is not None else None
-        if start_utc is not None and end_utc is not None and start_utc > end_utc:
-            raise ValueError("start must be before or equal to end")
-        if not math.isfinite(sample_rate) or not 0 < sample_rate <= 1:
-            raise ValueError("sample_rate must be greater than 0 and at most 1")
-        worker_count = _worker_count(workers)
+        start_utc, end_utc, worker_count = _query_options(
+            requested_names, start, end, sample_rate, workers
+        )
 
         found_names: set[str] = set()
         point_numbers: dict[str, int] = {}
@@ -77,16 +71,7 @@ class FTDCReader:
             }
             if not matching_slots:
                 continue
-            try:
-                timestamp_index = next(
-                    index
-                    for index, slot in enumerate(chunk.slots)
-                    if slot.path == "start" and slot.kind == "datetime"
-                )
-            except StopIteration as exc:
-                raise FTDCDecodeError(
-                    "metric reference document has no top-level datetime 'start'"
-                ) from exc
+            timestamp_index = _timestamp_index(chunk)
 
             found_names.update(matching_slots)
             for metric_name in matching_slots:
@@ -105,9 +90,7 @@ class FTDCReader:
                     for metric_name, (metric_index, slot) in matching_slots.items():
                         point_number = point_numbers[metric_name] + 1
                         point_numbers[metric_name] = point_number
-                        if int(point_number * sample_rate) == int(
-                            (point_number - 1) * sample_rate
-                        ):
+                        if int(point_number * sample_rate) == int((point_number - 1) * sample_rate):
                             continue
                         points_by_name[metric_name][timestamp] = DataPoint(
                             timestamp=timestamp,
@@ -157,6 +140,36 @@ class FTDCReader:
                 return dict(cast(Mapping[str, Any], parsed))
         raise FTDCError("MongoDB configuration not found in FTDC source")
 
+    def get_build_info(self) -> dict[str, Any]:
+        """Return MongoDB build and version metadata."""
+
+        return self._get_metadata_mapping("buildInfo", "build information")
+
+    def get_host_info(self) -> dict[str, Any]:
+        """Return host operating-system and hardware metadata."""
+
+        return self._get_metadata_mapping("hostInfo", "host information")
+
+    def get_ulimits(self) -> dict[str, Any]:
+        """Return process resource-limit metadata."""
+
+        return self._get_metadata_mapping("ulimits", "ulimits")
+
+    def get_sys_max_open_files(self) -> dict[str, Any]:
+        """Return system-wide maximum open-file metadata."""
+
+        return self._get_metadata_mapping("sysMaxOpenFiles", "maximum open files")
+
+    def get_metadata_start(self) -> datetime:
+        """Return the UTC timestamp at which metadata collection started."""
+
+        return self._get_metadata_timestamp("start")
+
+    def get_metadata_end(self) -> datetime:
+        """Return the UTC timestamp at which metadata collection ended."""
+
+        return self._get_metadata_timestamp("end")
+
     def list_metrics(self, *, all_chunks: bool = False) -> list[str]:
         """Return sorted dotted names for numeric fields in the source.
 
@@ -173,6 +186,18 @@ class FTDCReader:
                         if not all_chunks:
                             return sorted(names)
         return sorted(names)
+
+    def _get_metadata_mapping(self, key: str, label: str) -> dict[str, Any]:
+        value = self.get_metadata().get(key)
+        if isinstance(value, Mapping):
+            return dict(cast(Mapping[str, Any], value))
+        raise FTDCError(f"MongoDB {label} metadata not found in FTDC source")
+
+    def _get_metadata_timestamp(self, key: str) -> datetime:
+        value = self.get_metadata().get(key)
+        if isinstance(value, datetime):
+            return value
+        raise FTDCError(f"MongoDB metadata {key} timestamp not found in FTDC source")
 
     def _metric_chunks(
         self,
@@ -192,10 +217,7 @@ class FTDCReader:
             chunk_start, sample_count = timespan
             if end is not None and chunk_start > end:
                 return False
-            return (
-                start is None
-                or chunk_start.timestamp() + sample_count >= start.timestamp()
-            )
+            return start is None or chunk_start.timestamp() + sample_count >= start.timestamp()
 
         in_range_docs = [doc for doc in documents if _in_range(doc)]
 
@@ -269,6 +291,37 @@ def _as_utc(value: datetime, label: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _query_options(
+    requested_names: set[str],
+    start: datetime | None,
+    end: datetime | None,
+    sample_rate: float,
+    workers: object,
+) -> tuple[datetime | None, datetime | None, int]:
+    if "" in requested_names:
+        raise ValueError("metric names must not be empty")
+    start_utc = _as_utc(start, "start") if start is not None else None
+    end_utc = _as_utc(end, "end") if end is not None else None
+    if start_utc is not None and end_utc is not None and start_utc > end_utc:
+        raise ValueError("start must be before or equal to end")
+    if not math.isfinite(sample_rate) or not 0 < sample_rate <= 1:
+        raise ValueError("sample_rate must be greater than 0 and at most 1")
+    return start_utc, end_utc, _worker_count(workers)
+
+
+def _timestamp_index(chunk: DecodedChunk) -> int:
+    try:
+        return next(
+            index
+            for index, slot in enumerate(chunk.slots)
+            if slot.path == "start" and slot.kind == "datetime"
+        )
+    except StopIteration as exc:
+        raise FTDCDecodeError(
+            "metric reference document has no top-level datetime 'start'"
+        ) from exc
 
 
 def _worker_count(workers: object = None) -> int:
