@@ -10,7 +10,7 @@ from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pyftdc._codec import (
     DecodedChunk,
@@ -131,6 +131,31 @@ class FTDCReader:
         }
 
     query = get_metric
+
+    def get_config(self) -> dict[str, Any]:
+        """Return the parsed MongoDB command-line configuration.
+
+        The configuration is read from the first FTDC metadata document that
+        contains ``getCmdLineOpts.parsed``.
+        """
+
+        for path in self._paths():
+            with path.open("rb") as stream:
+                for document in iter_bson_documents(stream, path):
+                    metadata = document.get("doc")
+                    if document.get("type") != 0 or not isinstance(metadata, Mapping):
+                        continue
+                    typed_metadata = cast(Mapping[str, Any], metadata)
+                    command_line_options = typed_metadata.get("getCmdLineOpts")
+                    if not isinstance(command_line_options, Mapping):
+                        continue
+                    typed_options = cast(Mapping[str, Any], command_line_options)
+                    parsed = typed_options.get("parsed")
+                    if isinstance(parsed, Mapping):
+                        return dict(cast(Mapping[str, Any], parsed))
+        raise FTDCError("MongoDB configuration not found in FTDC source")
+
+    get_mongodb_config = get_config
 
     def list_metrics(self, *, all_chunks: bool = False) -> list[str]:
         """Return sorted dotted names for numeric fields in the source.

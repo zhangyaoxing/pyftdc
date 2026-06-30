@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from bson import BSON
 
 import pyftdc.reader as reader_module
-from pyftdc import FTDCReader, MetricNotFoundError
+from pyftdc import FTDCError, FTDCReader, MetricNotFoundError
 from tests.conftest import write_ftdc
 
 
@@ -69,6 +70,45 @@ def test_list_metrics_reads_only_first_chunk_by_default(tmp_path: Path) -> None:
 
     assert reader.list_metrics() == ["first", "start"]
     assert reader.list_metrics(all_chunks=True) == ["first", "later", "start"]
+
+
+def test_get_config_returns_parsed_mongodb_config(tmp_path: Path) -> None:
+    """MongoDB's parsed command-line options are extracted from FTDC metadata."""
+
+    config = {
+        "net": {"bindIp": "127.0.0.1", "port": 27017},
+        "security": {"authorization": "enabled"},
+    }
+    path = tmp_path / "metrics.interim"
+    path.write_bytes(
+        BSON.encode(
+            {
+                "type": 0,
+                "doc": {
+                    "getCmdLineOpts": {
+                        "argv": ["mongod", "--config", "/etc/mongod.conf"],
+                        "parsed": config,
+                        "ok": 1,
+                    }
+                },
+            }
+        )
+    )
+
+    reader = FTDCReader(path)
+
+    assert reader.get_config() == config
+    assert reader.get_mongodb_config() == config
+
+
+def test_get_config_raises_when_config_is_absent(tmp_path: Path) -> None:
+    """A source without configuration metadata reports a library-level error."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    path = write_ftdc(tmp_path / "metrics.interim", {"start": start, "value": 1}, [[], []])
+
+    with pytest.raises(FTDCError, match="configuration not found"):
+        FTDCReader(path).get_config()
 
 
 def test_get_metric_decodes_chunks_in_parallel_in_source_order(tmp_path: Path) -> None:
