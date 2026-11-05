@@ -5,17 +5,15 @@ from __future__ import annotations
 import math
 import struct
 import zlib
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO
 
 from bson import BSON
 from bson.codec_options import CodecOptions
-from bson.decimal128 import Decimal128
 from bson.errors import InvalidBSON
-from bson.timestamp import Timestamp
 
 from pyftdc.exceptions import FTDCDecodeError
 from pyftdc.models import MetricValue
@@ -23,6 +21,45 @@ from pyftdc.models import MetricValue
 _UINT64_MASK = (1 << 64) - 1
 _MIN_BSON_SIZE = 5
 _CODEC_OPTIONS: CodecOptions[Any] = CodecOptions(tz_aware=True, tzinfo=timezone.utc)
+
+# BSON element type bytes, keyed by the encoding used in reference documents.
+_ELEMENT_DOUBLE = 0x01
+_ELEMENT_STRING = 0x02
+_ELEMENT_DOCUMENT = 0x03
+_ELEMENT_ARRAY = 0x04
+_ELEMENT_BINARY = 0x05
+_ELEMENT_UNDEFINED = 0x06
+_ELEMENT_OBJECT_ID = 0x07
+_ELEMENT_BOOLEAN = 0x08
+_ELEMENT_DATETIME = 0x09
+_ELEMENT_NULL = 0x0A
+_ELEMENT_REGEX = 0x0B
+_ELEMENT_DB_POINTER = 0x0C
+_ELEMENT_CODE = 0x0D
+_ELEMENT_SYMBOL = 0x0E
+_ELEMENT_CODE_W_SCOPE = 0x0F
+_ELEMENT_INT32 = 0x10
+_ELEMENT_TIMESTAMP = 0x11
+_ELEMENT_INT64 = 0x12
+_ELEMENT_DECIMAL128 = 0x13
+_ELEMENT_MAX_KEY = 0x7F
+_ELEMENT_MIN_KEY = 0xFF
+
+# Element types whose value has a fixed width, including the empty ones.
+_FIXED_ELEMENT_SIZES = {
+    _ELEMENT_DOUBLE: 8,
+    _ELEMENT_UNDEFINED: 0,
+    _ELEMENT_OBJECT_ID: 12,
+    _ELEMENT_BOOLEAN: 1,
+    _ELEMENT_DATETIME: 8,
+    _ELEMENT_NULL: 0,
+    _ELEMENT_INT32: 4,
+    _ELEMENT_TIMESTAMP: 8,
+    _ELEMENT_INT64: 8,
+    _ELEMENT_DECIMAL128: 16,
+    _ELEMENT_MAX_KEY: 0,
+    _ELEMENT_MIN_KEY: 0,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,9 +74,8 @@ class MetricSlot:
 
 @dataclass(frozen=True, slots=True)
 class DecodedChunk:
-    """A reference document and its selected metric columns."""
+    """Selected metric slots and their decoded sample columns."""
 
-    reference: Mapping[str, Any]
     slots: tuple[MetricSlot, ...]
     columns: tuple[list[int], ...]
 
@@ -70,7 +106,7 @@ def decode_metric_document(
 ) -> DecodedChunk:
     """Decode one outer FTDC document whose type is 1."""
 
-    reference, slots, delta_count, encoded = _metric_parts(document)
+    slots, delta_count, encoded = _metric_parts(document)
     metric_count = len(slots)
     selected_indices = [
         index
@@ -83,13 +119,13 @@ def decode_metric_document(
         _accumulate_column(slot.initial, column)
         for slot, column in zip(selected_slots, deltas, strict=True)
     )
-    return DecodedChunk(reference, selected_slots, columns)
+    return DecodedChunk(selected_slots, columns)
 
 
 def metric_slots(document: Mapping[str, Any]) -> tuple[MetricSlot, ...]:
     """Return numeric field metadata without expanding the metric samples."""
 
-    _, slots, _, _ = _metric_parts(document)
+    slots, _, _ = _metric_parts(document)
     return slots
 
 
@@ -148,7 +184,7 @@ def _peek_reference(raw: bytes) -> tuple[Mapping[str, Any], int] | None:
 
 def _metric_parts(
     document: Mapping[str, Any],
-) -> tuple[Mapping[str, Any], tuple[MetricSlot, ...], int, memoryview]:
+) -> tuple[tuple[MetricSlot, ...], int, memoryview]:
     raw = _decompress_payload(document)
     if len(raw) < _MIN_BSON_SIZE:
         raise FTDCDecodeError("metric chunk has no reference document")
@@ -156,20 +192,16 @@ def _metric_parts(
     (reference_size,) = struct.unpack_from("<I", raw)
     if reference_size < _MIN_BSON_SIZE or reference_size + 8 > len(raw):
         raise FTDCDecodeError("invalid reference document size")
-    try:
-        reference = BSON(raw[:reference_size]).decode(codec_options=_CODEC_OPTIONS)
-    except InvalidBSON as exc:
-        raise FTDCDecodeError("invalid metric reference document") from exc
 
     metric_count, delta_count = struct.unpack_from("<II", raw, reference_size)
-    slots = tuple(_extract_slots(reference))
+    slots = tuple(_reference_slots(raw, reference_size))
     if len(slots) != metric_count:
         raise FTDCDecodeError(
             f"reference contains {len(slots)} numeric slots, chunk declares {metric_count}"
         )
 
     encoded = memoryview(raw)[reference_size + 8 :]
-    return reference, slots, delta_count, encoded
+    return slots, delta_count, encoded
 
 
 def _decompress_payload(document: Mapping[str, Any]) -> bytes:
@@ -211,37 +243,98 @@ def timestamp_for_value(raw_value: int) -> datetime:
     return datetime.fromtimestamp(_as_signed(raw_value) / 1000, tz=timezone.utc)
 
 
-def _extract_slots(value: object, path: str = "") -> Iterator[MetricSlot]:
-    if isinstance(value, Mapping):
-        mapping = cast(Mapping[object, object], value)
-        for name, child in mapping.items():
-            child_path = f"{path}.{name}" if path else str(name)
-            yield from _extract_slots(child, child_path)
-        return
-    if isinstance(value, (list, tuple)):
-        sequence = cast(Sequence[object], value)
-        for index, child in enumerate(sequence):
-            child_path = f"{path}.{index}" if path else str(index)
-            yield from _extract_slots(child, child_path)
-        return
+def _reference_slots(raw: bytes, size: int) -> Iterator[MetricSlot]:
+    """Yield reference slots in document order, duplicate field names included.
 
-    if isinstance(value, bool):
-        yield MetricSlot(path, int(value), "bool")
-    elif isinstance(value, int):
+    BSON allows repeated field names, and MongoDB's ``systemMetrics.mounts``
+    does repeat them when one mount point is mounted twice (for example two
+    ``/boot/efi`` entries). Decoding the reference into a mapping keeps only
+    the last value, which loses delta columns and shifts every following
+    metric index. The delta stream addresses each encoded value, so the
+    reference is walked as raw BSON instead.
+    """
+
+    yield from _walk_elements(raw, 4, size, "")
+
+
+def _walk_elements(raw: bytes, position: int, end: int, path: str) -> Iterator[MetricSlot]:
+    while position < end - 1:
+        type_byte = raw[position]
+        position += 1
+        name, position = _read_cstring(raw, position, end)
+        child_path = f"{path}.{name}" if path else name
+        if type_byte in (_ELEMENT_DOCUMENT, _ELEMENT_ARRAY):
+            (document_size,) = struct.unpack_from("<i", raw, position)
+            document_end = position + document_size
+            if document_size < _MIN_BSON_SIZE or document_end > end:
+                raise FTDCDecodeError("invalid nested document in metric reference")
+            yield from _walk_elements(raw, position + 4, document_end, child_path)
+            position = document_end
+            continue
+        yield from _element_slots(raw, position, child_path, type_byte)
+        position = _skip_element(raw, position, type_byte)
+        if position > end:
+            raise FTDCDecodeError("truncated metric reference document")
+
+
+def _read_cstring(raw: bytes, position: int, end: int) -> tuple[str, int]:
+    terminator = raw.find(b"\x00", position, end)
+    if terminator < 0:
+        raise FTDCDecodeError("unterminated element name in metric reference")
+    return raw[position:terminator].decode("utf-8", "surrogatepass"), terminator + 1
+
+
+def _element_slots(
+    raw: bytes,
+    position: int,
+    path: str,
+    type_byte: int,
+) -> Iterator[MetricSlot]:
+    if type_byte == _ELEMENT_BOOLEAN:
+        yield MetricSlot(path, int(raw[position]), "bool")
+    elif type_byte == _ELEMENT_INT32:
+        (value,) = struct.unpack_from("<i", raw, position)
         yield MetricSlot(path, value & _UINT64_MASK, "int")
-    elif isinstance(value, float):
+    elif type_byte == _ELEMENT_INT64:
+        (value,) = struct.unpack_from("<q", raw, position)
+        yield MetricSlot(path, value & _UINT64_MASK, "int")
+    elif type_byte == _ELEMENT_DOUBLE:
+        (value,) = struct.unpack_from("<d", raw, position)
         number = 0 if math.isnan(value) else max(-(1 << 63), min((1 << 63) - 1, int(value)))
         yield MetricSlot(path, number & _UINT64_MASK, "float")
-    elif isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-        yield MetricSlot(path, int(moment.timestamp() * 1000) & _UINT64_MASK, "datetime")
-    elif isinstance(value, Timestamp):
-        yield MetricSlot(path, value.time & _UINT64_MASK, "timestamp", 0)
-        yield MetricSlot(path, value.inc & _UINT64_MASK, "timestamp", 1)
-    elif isinstance(value, Decimal128):
-        low, high = struct.unpack("<QQ", value.bid)
+    elif type_byte == _ELEMENT_DATETIME:
+        (value,) = struct.unpack_from("<q", raw, position)
+        yield MetricSlot(path, value & _UINT64_MASK, "datetime")
+    elif type_byte == _ELEMENT_TIMESTAMP:
+        increment, seconds = struct.unpack_from("<II", raw, position)
+        yield MetricSlot(path, seconds & _UINT64_MASK, "timestamp", 0)
+        yield MetricSlot(path, increment & _UINT64_MASK, "timestamp", 1)
+    elif type_byte == _ELEMENT_DECIMAL128:
+        low, high = struct.unpack_from("<QQ", raw, position)
         yield MetricSlot(path, low, "decimal128", 0)
         yield MetricSlot(path, high, "decimal128", 1)
+
+
+def _skip_element(raw: bytes, position: int, type_byte: int) -> int:
+    if (fixed_size := _FIXED_ELEMENT_SIZES.get(type_byte)) is not None:
+        return position + fixed_size
+    if type_byte in (_ELEMENT_STRING, _ELEMENT_CODE, _ELEMENT_SYMBOL):
+        (length,) = struct.unpack_from("<i", raw, position)
+        return position + 4 + length
+    if type_byte == _ELEMENT_BINARY:
+        (length,) = struct.unpack_from("<i", raw, position)
+        return position + 5 + length
+    if type_byte == _ELEMENT_DB_POINTER:
+        (length,) = struct.unpack_from("<i", raw, position)
+        return position + 4 + length + 12
+    if type_byte == _ELEMENT_CODE_W_SCOPE:
+        (length,) = struct.unpack_from("<i", raw, position)
+        return position + length
+    if type_byte == _ELEMENT_REGEX:
+        _, position = _read_cstring(raw, position, len(raw))
+        _, position = _read_cstring(raw, position, len(raw))
+        return position
+    raise FTDCDecodeError(f"unsupported BSON element type 0x{type_byte:02x} in metric reference")
 
 
 def _decode_columns(

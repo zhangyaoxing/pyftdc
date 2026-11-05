@@ -8,7 +8,16 @@ from bson import BSON
 
 import pyftdc.reader as reader_module
 from pyftdc import FTDCError, FTDCReader, MetricNotFoundError
-from tests.conftest import write_ftdc
+from tests.conftest import (
+    bson_datetime,
+    bson_document,
+    bson_embedded_document,
+    bson_int32,
+    bson_int64,
+    bson_timestamp,
+    write_ftdc,
+    write_ftdc_reference,
+)
 
 
 def test_get_metric_filters_timespan_and_decodes_deltas(tmp_path: Path) -> None:
@@ -50,6 +59,63 @@ def test_get_metric_returns_multiple_metrics(tmp_path: Path) -> None:
     assert list(result) == ["other", "value"]
     assert [point.value for point in result["value"]] == [1, 2, 3]
     assert [point.value for point in result["other"]] == [10, 12, 14]
+
+
+def test_reference_with_duplicate_keys_keeps_every_delta_column(tmp_path: Path) -> None:
+    """Repeated reference field names still own their own delta columns.
+
+    A mount point mounted twice yields duplicate BSON keys, which a mapping
+    decode collapses; every following metric then reads the wrong column.
+    """
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reference = bson_document(
+        bson_datetime("start", int(start.timestamp() * 1000)),
+        bson_embedded_document(
+            "systemMetrics",
+            bson_embedded_document(
+                "mounts",
+                bson_int32("/boot/efi", 111),
+                bson_int32("/boot/efi", 222),
+            ),
+        ),
+        bson_int64("trailing", 42),
+    )
+    path = write_ftdc_reference(
+        tmp_path / "metrics.interim",
+        reference,
+        4,
+        [[1000, 1000], [1, 1], [2, 2], [3, 3]],
+    )
+
+    result = FTDCReader(path).get_metric({"trailing"}, start, start + timedelta(seconds=2))
+
+    assert [point.value for point in result["trailing"]] == [42, 45, 48]
+    assert FTDCReader(path).list_metrics(all_chunks=True) == [
+        "start",
+        "systemMetrics.mounts./boot/efi",
+        "trailing",
+    ]
+
+
+def test_timestamp_reference_decodes_seconds_before_increment(tmp_path: Path) -> None:
+    """A BSON timestamp stores its increment first, then the seconds."""
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    reference = bson_document(
+        bson_datetime("start", int(start.timestamp() * 1000)),
+        bson_timestamp("oplog", 1793204774, 10),
+    )
+    path = write_ftdc_reference(
+        tmp_path / "metrics.interim",
+        reference,
+        3,
+        [[1000, 1000], [0, 0], [0, 0]],
+    )
+
+    result = FTDCReader(path).get_metric({"oplog"}, start, start + timedelta(seconds=3))
+
+    assert [point.value for point in result["oplog"]] == [1793204774] * 3
 
 
 def test_list_metrics_reads_only_first_chunk_by_default(tmp_path: Path) -> None:
